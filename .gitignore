@@ -49,3 +49,7 @@ po/*~
 rsconnect/
 
 .DS_Store
+
+# Temporary Microsoft files
+~$*.docx
+~$*.xlsx
