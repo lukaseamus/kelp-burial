@@ -961,23 +961,111 @@ Fig_4 %>%
   ggsave(filename = "Fig_4.pdf", path = "Figures",
          device = cairo_pdf, height = 12, width = 22, units = "cm")
 
-# Calculate corresponding carbon influx
-kelp_carb %>% 
-  filter(Date == "26.09.25" & Species != "Saccharina latissima") %>%
-  summarise(C = mean(C/100), .by = Species) %>%
-  full_join(sed %>% distinct(Species, Sediment, Load)) %>%
-  mutate(Influx = Load * C / ( pi * 0.05^2 ))
+# 4. Tables ####
+# Calculate corresponding carbon influx loads
+loads <- sed %>% 
+  distinct(Species, Load) %>%
+  left_join(
+    kelp_carb %>% filter(Date == "26.09.25"),
+    relationship = "many-to-many"
+  ) %>%
+  mutate(
+    g_C = Load * C / 100,
+    g_C_m2 = g_C / ( pi * 0.05^2 )
+  ) %>%
+  summarise(
+    across(
+      c(g_C, g_C_m2),
+      list(
+        mean = mean,
+        sd = sd
+      )
+    ),
+    n = n(),
+    .by = c(Species, Load)
+  ) %>%
+  mutate(
+    across( 
+      where(is.numeric), 
+      ~ if_else(.x < 100, signif(.x, 2), signif(.x, 3))
+    ),
+    g_C = glue("{g_C_mean} ± {g_C_sd}"),
+    g_C_m2 = glue("{g_C_m2_mean} ± {g_C_m2_sd}")
+  ) %>%
+  select(!c(ends_with("mean"), ends_with("sd"), ends_with("median"))) %T>%
+  print()
 
 # Calculate baseline carbon stocks
 sed %>%
   filter(Day == 0) %>%
-  mutate(C_m2 = Mass_c * Corg / ( pi * 0.05^2 )) %>%
-  summarise(C_m2_mean = mean(C_m2),
-            C_m2_sd = sd(C_m2),
+  mutate(g_C_m2 = Mass_c * Corg / ( pi * 0.05^2 )) %>%
+  summarise(g_C_m2_mean = mean(g_C_m2),
+            g_C_m2_sd = sd(g_C_m2),
             n = n(),
             .by = Sediment) %>%
   mutate(
     across(c(ends_with("mean"), ends_with("sd")), ~ signif(.x, 2)),
-    C_m2 = glue("{C_m2_mean} ± {C_m2_sd} (n = {n})")
+    g_C_m2 = glue("{g_C_m2_mean} ± {g_C_m2_sd} (n = {n})")
   )
 
+# Calculate global parameters
+time_prior_posterior_global %>%
+  summarise(
+    across(
+      c(beta, delta, k, t0.5, r),
+      list(
+        mean = mean,
+        median = median,
+        sd = sd
+      )
+    ),
+    n = n(),
+    # Probabilities that slopes are different from zero
+    P_beta = mean( beta < 0 ), # k is expected to decrease with load, i.e. beta < 0
+    P_delta = mean( delta > 0 ), # r is expected to increase with load, i.e. delta > 0
+    .by = distribution
+  ) %>%
+  mutate(
+    across( where(is.numeric) , ~ signif(.x, 2) ),
+    beta = glue("{beta_mean} ± {beta_sd} ({beta_median})"),
+    delta = glue("{delta_mean} ± {delta_sd} ({delta_median})"),
+    k = glue("{k_mean} ± {k_sd} ({k_median})"),
+    t0.5 = glue("{t0.5_mean} ± {t0.5_sd} ({t0.5_median})"),
+    r = glue("{r_mean * 100} ± {r_sd * 100} ({r_median * 100})")
+  ) %>%
+  select(!c(ends_with("mean"), ends_with("sd"), ends_with("median")))
+  
+time_summary <- time_prior_posterior %>%
+  summarise(
+    across(
+      c(k, t0.5, r),
+      list(
+        mean = mean,
+        median = median,
+        sd = sd
+      )
+    ),
+    n = n(),
+    .by = c(Species, Sediment, Load)
+  ) %>%
+  mutate(
+    across( where(is.numeric) , ~ signif(.x, 2) ),
+    k = glue("{k_mean} ± {k_sd} ({k_median})"),
+    t0.5 = glue("{t0.5_mean} ± {t0.5_sd} ({t0.5_median})"),
+    r = glue("{r_mean * 100} ± {r_sd * 100}") # for r, mean = median
+  ) %>%
+  select(!c(ends_with("mean"), ends_with("sd"), ends_with("median"))) %T>%
+  print()
+
+Table_3 <- time_summary %>%
+  filter(Species != "Prior") %>%
+  full_join(loads %>% select(Species, Load, g_C_m2)) %>%
+  arrange(Species) %T>%
+  print()
+
+Table_3 %>%
+  write_csv(here("Tables", "Table_3.csv"))
+
+read_docx() %>%
+  body_add_table(value = Table_3) %>%
+  print(target = here("Tables", "Table_3.docx"))
