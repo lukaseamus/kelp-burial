@@ -42,18 +42,18 @@ model{
   // Priors
   // Decay constant k
   alpha_mu ~ normal( log(0.1) , 1 );
-  alpha_sigma_sp ~ normal( 0 , 0.3 )T[0,];
-  alpha_sigma_sed ~ normal( 0 , 0.3 )T[0,];
-  alpha_z_sp ~ normal( 0 , 1 );
-  alpha_z_sed ~ normal( 0 , 1 );
+  alpha_sigma_sp ~ normal( 0 , 1 )T[0,];
+  alpha_sigma_sed ~ normal( 0 , 1 )T[0,];
+  alpha_z_sp ~ std_normal(); // standard normal for z-scores
+  alpha_z_sed ~ std_normal();
   beta ~ normal( 0 , 0.1 );
   
   // "Refractory" proportion r
   gamma_mu ~ normal( logit(0.1) , 1 );
-  gamma_sigma_sp ~ normal( 0 , 0.3 )T[0,];
-  gamma_sigma_sed ~ normal( 0 , 0.3 )T[0,];
-  gamma_z_sp ~ normal( 0 , 1 );
-  gamma_z_sed ~ normal( 0 , 1 );
+  gamma_sigma_sp ~ normal( 0 , 1 )T[0,];
+  gamma_sigma_sed ~ normal( 0 , 1 )T[0,];
+  gamma_z_sp ~ std_normal();
+  gamma_z_sed ~ std_normal();
   delta ~ normal( 0 , 0.1 );
   
   // Likelihood precision

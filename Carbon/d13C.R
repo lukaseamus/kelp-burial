@@ -27,7 +27,8 @@ acid <- here("Carbon", "Acidification.csv") %>%
 # Sediment carbon
 sed_carb <- here("Carbon", "d13C_Sediment.csv") %>%
   read_csv() %>%
-  filter(Reliable) %T>% # Take only reliable samples
+  mutate(Date = Date %>% dmy()) %>%
+  filter(Reliable | Date == dmy("26.10.26")) %T>% # Take only reliable samples
   print()
 
 sed_carb %>%
@@ -48,7 +49,7 @@ sed_carb %>%
     Unique = n_distinct(c_across(1:3), na.rm = TRUE) ==
       sum(!is.na(c_across(1:3)))
   )
-# All duplicates are true, unique replicates
+# All replicates are true, unique replicates
 
 # I'm taking the mean of samples mass, carbon content and d13C,
 # and picking the first 
@@ -323,8 +324,10 @@ sed %<>%
     # Calculate added kelp carbon
     C_kelp_initial = Kelp * Corg_kelp, 
     # Calculate remaining kelp carbon
-    C_kelp_final = Mass_c * Corg * Fraction, 
-    # Calculate remaining proportion
+    C_kelp_final = Mass_c * Corg * Fraction,
+    # Represent as areal carbon stock rather than total carbon
+    C_kelp_m2 = C_kelp_final / ( pi * 0.052^2 ), # cores had 104 mm inner diameter (radius = 0.052 m)
+    # Calculate remaining proportion of initial kelp carbon
     Proportion = C_kelp_final / C_kelp_initial,
     # Proportion is 1 at t0 on surface, 0 below
     Proportion = case_when(
@@ -337,29 +340,31 @@ sed %<>%
 
 sed %$% range(Proportion) # All good
 
-# 1.8 Sum across horizons per core ####
-sed_sum <- sed %>%
-  summarise(
-    across(c(Mass, Mass_c, Proportion), sum),
-    .by = c(ID_core, Species, Sediment, Load, Day)
+# Convert categorical variables to factors
+sed %<>%
+  mutate(
+    Species = Species %>% fct(), 
+    Sediment = Sediment %>% fct()
   ) %T>%
-  print(n = 50)
-
-sed_sum %<>% # Convert categorical variables to factors
-  mutate(Species = Species %>% fct(), 
-         Sediment = Sediment %>% fct())
-
-# 1.9 Calculate final kelp carbon stock ####
-final <- sed %>%
-  filter(Day == max(Day),
-         .by = c(Species, Sediment, Load)) %>%
-  # Cores were 10 cm in diameter, so radius is 0.05 m
-  mutate(C_m2 = C_kelp_final / ( pi * 0.05^2 )) %T>%
   print()
 
-final %<>% # Convert categorical variables to factors
-  mutate(Species = Species %>% fct(), 
-         Sediment = Sediment %>% fct())
+# Save data
+sed %>%
+  write_rds(here("Carbon", "RDS", "sed.rds"))
+
+# 1.8 Sum across horizons per 10-cm core ####
+sed_sum <- sed %>%
+  filter(Depth < 10) %>% # Filter out 11th cm horizons for Laminaria
+  summarise(
+    across(
+      # Fraction cannot be summed because it is the fraction of total sediment
+      # carbon per horizon and can add up to more than 1
+      c(Mass, Mass_c, C_kelp_final, C_kelp_m2, Proportion), 
+      sum
+    ),
+    .by = c(ID_core, Species, Sediment, Kelp, Load, Day)
+  ) %T>%
+  print(n = 100)
 
 # 2. Models ####
 # 2.1 Time ####
@@ -367,12 +372,12 @@ final %<>% # Convert categorical variables to factors
 require(extraDistr)
 tibble(n = 1:1e3,
        alpha_mu = rnorm( 1e3 , log(0.1) , 1 ),
-       alpha_sigma_sp = rtnorm( 1e3 , 0 , 0.3 , 0 ),
-       alpha_sigma_sed = rtnorm( 1e3 , 0 , 0.3 , 0 ),
+       alpha_sigma_sp = rhnorm( 1e3 , 1 ),
+       alpha_sigma_sed = rhnorm( 1e3 , 1 ),
        beta = rnorm( 1e3 , 0 , 0.1 ),
        gamma_mu = rnorm( 1e3 , qlogis(0.1) , 1 ),
-       gamma_sigma_sp = rtnorm( 1e3 , 0 , 0.3 , 0 ),
-       gamma_sigma_sed = rtnorm( 1e3 , 0 , 0.3 , 0 ),
+       gamma_sigma_sp = rhnorm( 1e3 , 1 ),
+       gamma_sigma_sed = rhnorm( 1e3 , 1 ),
        delta = rnorm( 1e3 , 0 , 0.1 ),
        nu = rgamma( 1e3 , 30^2 / 20^2 , 30 / 20^2 )) %>%
   mutate(
@@ -438,7 +443,7 @@ time_samples$summary() %>%
   summarise(rhat_1.001 = mean( rhat > 1.001 ),
             rhat_mean = mean(rhat),
             rhat_sd = sd(rhat))
-# No rhat above 1.001. rhat = 1.00 ± 0.000145.
+# No rhat above 1.001. rhat = 1.00 ± 0.000126.
 
 # Chains
 require(bayesplot)
@@ -477,7 +482,7 @@ time_prior %>%
     group_name = "Species",
     second_group_name = "Sediment"
   )
-# No real difference between species and sediments. No change with load.
+# Priors do not constrain posteriors
 
 # 2.1.5 Parameters ####
 time_prior_posterior_global <- time_prior %>% 
@@ -493,7 +498,7 @@ time_prior_posterior_global <- time_prior %>%
       alpha_mu + 
         rnorm( n() , 0 , alpha_sigma_sp ) +
         rnorm( n() , 0 , alpha_sigma_sed ) +
-        beta * 0 # for 10 g kelp because load is centred on 10
+        beta * 0 # prediction for 10 g kelp because load is centred on 10
     ), 
     t0.5 = log(2) / k, # half-life
     r = plogis(
@@ -619,13 +624,22 @@ mytheme <- theme(panel.background = element_blank(),
 # 2.1 Figure 1 ####
 require(ggh4x)
 Fig_1 <- sed %>%
-  filter(Depth < 10) %>%
+  filter(Depth < 10) %>% # Remove 11th cm horizon for Laminaria
+  mutate(
+    alpha = if_else(
+      Sediment == "Fine sand" & Day == 0,
+      .5, 1 # halve opacity for replicated control cores
+    )
+  ) %>%
   ggplot() +
-    geom_point(aes(Day, Fraction * 100, colour = Species), 
-               shape = 16, size = 2.5) +
+    geom_point(
+      aes(Day, Fraction * 100, colour = Species, alpha = alpha), 
+      shape = 16, size = 2.5
+    ) +
     geom_hline(yintercept = 0, lineend = "square") +
     scale_colour_manual(values = c("#c3b300", "#627d0e", "#f1c700"),
                         guide = "none") +
+    scale_alpha_identity() +
     facet_nested(
       Depth ~ Species + Sediment + Load, 
       nest_line = TRUE, solo_line = TRUE,
@@ -835,11 +849,14 @@ Fig_3b <- time_prior_posterior %>%
                  n = 2^10, bw = 6 * 0.02, colour = NA) +
     scale_fill_manual(values = c("#c3b300", "#627d0e", "#f1c700"),
                       guide = "none") +
-    scale_x_continuous(limits = c(0, 6),
-                       breaks = seq(0, 6, 3),
-                       oob = scales::oob_keep) +
+    scale_x_continuous(
+      limits = c(0, 10),
+      breaks = seq(0, 10, 5),
+      oob = scales::oob_keep
+    ) +
     facet_nested(
       ~ Species + Sediment + Load, 
+      # scales = "free_x", space = "free_x",
       nest_line = TRUE, solo_line = TRUE,
       strip = strip_nested(
         clip = "off", by_layer_x = TRUE,
@@ -858,6 +875,18 @@ Fig_3b <- time_prior_posterior %>%
         )
       )
     ) +
+    # facetted_pos_scales(
+    #   x = list(
+    #     Species == "Ecklonia radiata" ~
+    #       scale_x_continuous(limits = c(0, 12),
+    #                          breaks = seq(0, 12, 3),
+    #                          oob = scales::oob_keep),
+    #     Species %>% str_detect("Laminaria") ~
+    #       scale_x_continuous(limits = c(0, 3),
+    #                          breaks = c(0, 3),
+    #                          oob = scales::oob_keep)
+    #   )
+    # ) +
     labs(x = "Half-life of labile kelp (days)") +
     coord_cartesian(expand = FALSE, clip = "off") +
     mytheme +
@@ -903,11 +932,11 @@ Fig_3 %>%
          device = cairo_pdf, height = 16, width = 22, units = "cm")
 
 # 2.4 Figure 4 ####
-Fig_4 <- final %>%
-  filter(Depth < 10) %>%
+Fig_4 <- sed %>%
+  filter(Depth < 10 & Day == max(Day), .by = Species) %>%
   ggplot() +
-    geom_col(aes(Depth, C_m2, fill = Species)) +
-    # geom_point(aes(Depth, C_m2), colour = "black",
+    geom_col(aes(Depth, C_kelp_m2, fill = Species)) +
+    # geom_point(aes(Depth, C_kelp_m2), colour = "black",
     #            shape = 16, size = 2.5) +
     scale_fill_manual(values = c("#c3b300", "#627d0e", "#f1c700"),
                         guide = "none") +
@@ -961,6 +990,65 @@ Fig_4 %>%
   ggsave(filename = "Fig_4.pdf", path = "Figures",
          device = cairo_pdf, height = 12, width = 22, units = "cm")
 
+# Alternative using proportion on log scale
+Fig_4 <- sed %>%
+  mutate(
+    Proportion = if_else(
+      Proportion == 0, 
+      min(Proportion[Proportion > 0]), 
+      Proportion
+    )
+  ) %>%
+  filter(Depth < 10 & Day == max(Day), .by = Species) %>%
+  ggplot() +
+    geom_rect(
+      aes(xmin = Depth - 0.45, xmax = Depth + 0.45,
+          ymin = 1e-4, ymax = Proportion, fill = Species)
+    ) +
+    # geom_col(aes(Depth, Proportion, fill = Species)) +
+    scale_fill_manual(values = c("#c3b300", "#627d0e", "#f1c700"),
+                        guide = "none") +
+    scale_x_reverse(limits = c(0, 10), breaks = 0:10) +
+    # scale_y_continuous(
+    #   limits = c(0, 1),
+    #   breaks = seq(0, 1, .5),
+    #   labels = scales::label_number(accuracy = c(1, .1, 1))
+    # ) +
+    scale_y_log10(
+      limits = 10^c(-4, 0),
+      breaks = 10^seq(-4, 0, 2),
+      labels = scales::label_log()
+    ) +
+    facet_nested(
+      ~ Species + Sediment + Load,
+      nest_line = TRUE, solo_line = TRUE,
+      scales = "free",
+      strip = strip_nested(
+        clip = "off", by_layer_x = TRUE,
+        text_x = list(element_text(face = "italic"), NULL, NULL)
+      ),
+      labeller = labeller(
+        Load = c(
+          "1" = "1 g",
+          "7.5" = "7.5 g",
+          "10" = "10 g",
+          "15" = "15 g"
+        ),
+        Sediment = c( # Abbreviate sand
+          "Coarse sand" = "Coarse",
+          "Fine sand" = "Fine"
+        )
+      )
+    ) +
+    labs(y = "Remaining proportion of kelp",
+         x = "Depth (cm)") +
+    coord_flip(expand = FALSE, clip = "off") +
+    mytheme +
+    theme(plot.margin = margin(0.2, 0.5, 0.2, 0.2, unit = "cm"),
+          panel.spacing.x = unit(1, "cm"))
+
+Fig_4
+
 # 4. Tables ####
 # Calculate corresponding carbon influx loads
 loads <- sed %>% 
@@ -971,7 +1059,7 @@ loads <- sed %>%
   ) %>%
   mutate(
     g_C = Load * C / 100,
-    g_C_m2 = g_C / ( pi * 0.05^2 )
+    g_C_m2 = g_C / ( pi * 0.052^2 )
   ) %>%
   summarise(
     across(
@@ -998,7 +1086,7 @@ loads <- sed %>%
 # Calculate baseline carbon stocks
 sed %>%
   filter(Day == 0) %>%
-  mutate(g_C_m2 = Mass_c * Corg / ( pi * 0.05^2 )) %>%
+  mutate(g_C_m2 = Mass_c * Corg / ( pi * 0.052^2 )) %>%
   summarise(g_C_m2_mean = mean(g_C_m2),
             g_C_m2_sd = sd(g_C_m2),
             n = n(),
